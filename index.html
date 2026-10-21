@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Ricochet Frenzy: Multiplier Drop</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="css/main.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- TOP HUD BAR -->
+    <header id="hud">
+      <div class="hud-col">
+        <div class="hud-item"><span class="hud-k">WAVE</span><span class="hud-v" id="hud-wave">W1</span></div>
+        <div class="hud-item"><span class="hud-k">SHOTS</span><span class="hud-v" id="hud-shots">8/8</span></div>
+      </div>
+      <div class="hud-mid">
+        <div class="state-tag" id="state-tag" data-state="AIMING">AIMING</div>
+        <div class="ball-counter">
+          <span class="ball-big" id="hud-balls">5</span>
+          <span class="ball-sub">score <span id="hud-score">0</span> · phys <span id="hud-phys">0</span>/250</span>
+        </div>
+      </div>
+      <div class="hud-col right">
+        <div class="hud-item"><span class="hud-k">BEST</span><span class="hud-v" id="hud-high">0</span></div>
+        <div class="hud-item coins"><span class="hud-v" id="hud-coins">0</span><span class="hud-k">💰</span></div>
+        <button id="btn-mute" class="icon-btn" title="Toggle sound">🔊</button>
+      </div>
+    </header>
+
+    <!-- GAME CANVAS -->
+    <main id="stage">
+      <canvas id="game"></canvas>
+
+      <div id="tutorial" class="tutorial">
+        <div class="tut-arrow">👆</div>
+        <b>DRAG TO AIM BANK SHOTS</b>
+        <span>Hit TNT barrels &amp; backstab armored blocks!</span>
+      </div>
+
+      <button id="ff-badge" class="ff-badge" title="Cycle speed">2x SPEED ⏩</button>
+      <button id="btn-recall" class="recall-btn">⬇ RECALL BALLS</button>
+      <div id="toast" class="toast"></div>
+      <div id="boot-error" class="boot-error"></div>
+
+      <div id="overlay" class="overlay">
+        <div class="ov-card">
+          <h2>RUN OVER 💀</h2>
+          <div class="ov-row"><span>Score</span><b id="ov-score">0</b></div>
+          <div class="ov-row"><span>Best Score</span><b id="ov-high">0</b></div>
+          <div class="ov-row"><span>Wave Reached</span><b id="ov-wave">1</b></div>
+          <button id="btn-restart" class="big-btn">🔄 NEW ROGUELIKE RUN</button>
+          <p class="ov-hint">Upgrades reset each run — spend gold wisely!</p>
+        </div>
+      </div>
+    </main>
+
+    <!-- BOTTOM UPGRADE SHOP (4 BUTTONS) -->
+    <footer id="shop" aria-label="Upgrade shop"></footer>
+    <div id="shop-hint">🎯 Clear waves fast for Skill Gold · 🛡️ Armored blocks take 2x DMG from above!</div>
+  </div>
+
+  <script src="js/config.js"></script>
+  <script src="js/audio.js"></script>
+  <script src="js/physics.js"></script>
+  <script src="js/spawner.js"></script>
+  <script src="js/game.js"></script>
+</body>
+</html>
