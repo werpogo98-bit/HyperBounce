@@ -235,9 +235,13 @@
   }
 
   function hitBlock(ball, blk, nx, ny) {
-    const now = performance.now();
-    if (blk.dead || (blk._hitCd && blk._hitCd > now)) return;
-    blk._hitCd = now + 26;
+    // Кулдаун удара привязан к конкретному шарику, а не к блоку:
+    // он защищает от «двойного засчитывания» одного и того же шара за один кадр,
+    // но разные шарики могут бить блок одновременно.
+    if (blk.dead) return;
+    if (ball._lastHitBlock === blk && ball._lastHitTime && performance.now() - ball._lastHitTime < 26) return;
+    ball._lastHitBlock = blk;
+    ball._lastHitTime = performance.now();
 
     let dmg = ball.damage * ball.virtual;
     let isCrit = Math.random() < G.critChance;
