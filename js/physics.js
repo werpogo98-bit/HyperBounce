@@ -28,18 +28,6 @@
     return { nx: qx / dist, ny: qy / dist, depth: maxR - dist };
   }
 
-  function triPlane(blk) {
-    const x = blk.x, y = blk._sy !== undefined ? blk._sy : blk.y;
-    const w = blk.w, h = blk.h;
-    switch (blk.cut) {
-      case 'tl': return { px: x + w, py: y, nx: -Math.SQRT1_2, ny: -Math.SQRT1_2, ex: x, ey: y + h };
-      case 'tr': return { px: x, py: y, nx: Math.SQRT1_2, ny: -Math.SQRT1_2, ex: x + w, ey: y + h };
-      case 'bl': return { px: x, py: y, nx: -Math.SQRT1_2, ny: Math.SQRT1_2, ex: x + w, ey: y + h };
-      case 'br': return { px: x + w, py: y, nx: Math.SQRT1_2, ny: Math.SQRT1_2, ex: x, ey: y + h };
-      default: return null;
-    }
-  }
-
   function reflect(ball, nx, ny, rest) {
     const vn = ball.vx * nx + ball.vy * ny;
     if (vn < 0) {
@@ -48,28 +36,79 @@
     }
   }
 
+  // Истинная форма треугольного (половинчатого) блока — те же вершины,
+  // что рисует игра. Раньше физика (и прицел) использовала ВЕСЬ прямоугольник:
+  // шар и preview-траектория «врезались» в пустоту срезанного угла, из-за чего
+  // прицел показывал попадание в блок, которого там нет.
+  function triVerts(blk) {
+    const x = blk.x, y = blk._sy !== undefined ? blk._sy : blk.y;
+    const w = blk.w, h = blk.h;
+    switch (blk.cut) {
+      case 'tl': return [{ x: x + w, y: y }, { x: x + w, y: y + h }, { x: x, y: y + h }];
+      case 'tr': return [{ x: x, y: y }, { x: x + w, y: y + h }, { x: x + w, y: y }];
+      case 'bl': return [{ x: x, y: y }, { x: x + w, y: y }, { x: x, y: y + h }];
+      case 'br': return [{ x: x, y: y }, { x: x + w, y: y }, { x: x + w, y: y + h }];
+      default: return null;
+    }
+  }
+
+  // Ближайшая точка на отрезке AB к точке P + вектор расталкивания
+  function closestOnSeg(px, py, ax, ay, bx, by) {
+    const abx = bx - ax, aby = by - ay;
+    const l2 = abx * abx + aby * aby;
+    let t = l2 > 0 ? ((px - ax) * abx + (py - ay) * aby) / l2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const cx = ax + abx * t, cy = ay + aby * t;
+    let dx = px - cx, dy = py - cy;
+    const d = Math.hypot(dx, dy);
+    if (d === 0) { dx = -aby; dy = abx; const n = Math.hypot(dx, dy) || 1; dx /= n; dy /= n; }
+    else { dx /= d; dy /= d; }
+    return { cx, cy, d, nx: dx, ny: dy };
+  }
+
+  function pointInTri(px, py, v) {
+    const d1 = (px - v[0].x) * (v[1].y - v[0].y) - (py - v[0].y) * (v[1].x - v[0].x);
+    const d2 = (px - v[1].x) * (v[2].y - v[1].y) - (py - v[1].y) * (v[2].x - v[1].x);
+    const d3 = (px - v[2].x) * (v[0].y - v[2].y) - (py - v[2].y) * (v[0].x - v[2].x);
+    const hasNeg = d1 < 0 || d2 < 0 || d3 < 0;
+    const hasPos = d1 > 0 || d2 > 0 || d3 > 0;
+    return !(hasNeg && hasPos);
+  }
+
+  // Честный коллайдер для половинчатых блоков: круг против РЕАЛЬНОГО треугольника
+  Physics.triHit = function (ball, blk) {
+    const verts = triVerts(blk);
+    if (!verts) return null;
+    const inside = pointInTri(ball.x, ball.y, verts);
+    if (inside) {
+      let best = null, bestD = Infinity;
+      for (let i = 0; i < 3; i++) {
+        const a = verts[i], b = verts[(i + 1) % 3];
+        const c = closestOnSeg(ball.x, ball.y, a.x, a.y, b.x, b.y);
+        if (c.d < bestD) { bestD = c.d; best = c; }
+      }
+      if (!best) return null;
+      const depth = ball.r + bestD;
+      return { nx: -best.nx, ny: -best.ny, depth };
+    }
+    let best = null, bestD = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const a = verts[i], b = verts[(i + 1) % 3];
+      const c = closestOnSeg(ball.x, ball.y, a.x, a.y, b.x, b.y);
+      if (c.d < bestD) { bestD = c.d; best = c; }
+    }
+    if (!best || bestD >= ball.r) return null;
+    return { nx: best.nx, ny: best.ny, depth: ball.r - bestD };
+  };
+
   function collideTriBlock(ball, blk, by) {
     const cfg = C();
-    const plane = triPlane(blk);
-    if (plane) {
-      const d = (ball.x - plane.px) * plane.nx + (ball.y - plane.py) * plane.ny;
-      if (d > 0 && d < ball.r) {
-        const vx = plane.ex - plane.px, vy = plane.ey - plane.py;
-        const t = ((ball.x - plane.px) * vx + (ball.y - plane.py) * vy) / (vx * vx + vy * vy);
-        if (t >= 0 && t <= 1) {
-          ball.x += plane.nx * (ball.r - d);
-          ball.y += plane.ny * (ball.r - d);
-          reflect(ball, plane.nx, plane.ny, cfg.RESTITUTION);
-          return { nx: plane.nx, ny: plane.ny };
-        }
-      }
-    }
-    const res = circleVsRoundedRect(ball.x, ball.y, ball.r, blk.x + blk.w / 2, by + blk.h / 2, blk.w, blk.h, cfg.BLOCK_RADIUS);
-    if (res) {
-      ball.x += res.nx * res.depth;
-      ball.y += res.ny * res.depth;
-      reflect(ball, res.nx, res.ny, cfg.RESTITUTION);
-      return { nx: res.nx, ny: res.ny };
+    const hit = Physics.triHit(ball, blk);
+    if (hit) {
+      ball.x += hit.nx * hit.depth;
+      ball.y += hit.ny * hit.depth;
+      reflect(ball, hit.nx, hit.ny, cfg.RESTITUTION);
+      return { nx: hit.nx, ny: hit.ny };
     }
     return null;
   }

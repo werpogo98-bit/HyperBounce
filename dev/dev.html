@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Ricochet Frenzy — DEV панель</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; background: #17131c; font-family: system-ui, sans-serif; color: #FFF6EA; display: flex; flex-direction: column; height: 100vh; }
+    #bar { padding: 8px 10px; background: #241F2C; border-bottom: 1px solid rgba(255,255,255,.08); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    #bar b { font-size: 12px; letter-spacing: .08em; opacity: .7; margin-right: 4px; }
+    button { background: #3a2f45; color: #FFF6EA; border: 1px solid rgba(255,255,255,.14); border-radius: 10px; padding: 9px 14px; font-size: 14px; cursor: pointer; transition: transform .08s, background .15s; }
+    button:active { transform: scale(.94); background: #4a3b58; }
+    input[type=number] { width: 74px; background: #1d1824; color: #FFF6EA; border: 1px solid rgba(255,255,255,.14); border-radius: 8px; padding: 8px; font-size: 14px; }
+    #log { position: fixed; right: 8px; bottom: 8px; max-width: 260px; font-size: 12px; background: rgba(0,0,0,.55); padding: 6px 8px; border-radius: 8px; pointer-events: none; white-space: pre-line; }
+    iframe { flex: 1; border: 0; width: 100%; background: #000; }
+  </style>
+</head>
+<body>
+  <div id="bar">
+    <b>DEV</b>
+    <button onclick="act(() => RF.debug.addCoins(500))">+500 💰</button>
+    <button onclick="act(() => RF.debug.addCoins(99999))">+99999 💰</button>
+    <input id="waveN" type="number" value="68" min="1" />
+    <button onclick="act(() => RF.debug.gotoWave(+document.getElementById('waveN').value))">→ Волна N</button>
+    <button onclick="act(() => RF.debug.gotoWave(68))">⏭ 68 волна</button>
+    <button onclick="act(() => RF.debug.setBalls(12))">Шаров = 12</button>
+    <button onclick="act(() => RF.debug.setDamage(9))">Урон = 9</button>
+    <button onclick="act(() => RF.debug.clearWave())">💥 Зачистить блок</button>
+  </div>
+  <iframe id="gameFrame" src="../index.html?dev=1"></iframe>
+  <div id="log"></div>
+  <script>
+    function act(fn) {
+      const w = document.getElementById('gameFrame').contentWindow;
+      try { log(String(fn.call(w)) + '  ✔'); }
+      catch (e) { log('Ошибка: ' + e.message); }
+    }
+    function log(s) { document.getElementById('log').textContent = s; setTimeout(() => { document.getElementById('log').textContent = ''; }, 2500); }
+  </script>
+</body>
+</html>

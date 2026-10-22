@@ -72,23 +72,25 @@
     },
 
     HEATMAP: [
-      '#2ED573', // low HP - mint
-      '#1E90FF', // sky
-      '#5352ED', // indigo
-      '#FFA502', // amber
-      '#FF6348', // coral
-      '#FF4757', // crimson
-      '#A55EEA', // purple
-      '#F15BB5'  // magenta high HP
+      '#7FB8A4', // приглушённая мята — низкий HP
+      '#9BC4A8', // шалфей
+      '#C9B98A', // тёплый песок
+      '#E0B36A', // карамель
+      '#E29A63', // терракота светлая
+      '#D97F5F', // терракота
+      '#C96A6A', // кирпичная роза
+      '#B85C7A'  // пыльная роза — высокий HP
     ],
-    BOSS_COLOR: '#E5484D',
-    TNT_COLOR: '#FF7F50',
-    BALL_COLORS: ['#4CC9F0', '#3DDC97', '#FFD166', '#FF5D8F', '#B388FF'],
-    SUPER_BALL_COLOR: '#FFD166',
-    MEGA_BALL_COLOR: '#FF6B35',
-    BG: '#1E2238',
-    BG_PANEL: '#262B4A',
-    TEXT: '#F4F6FF',
+    BOSS_COLOR: '#B85C7A',
+    TNT_COLOR: '#E29A63',
+    BALL_COLORS: ['#F4A261', '#E9C46A', '#7FB8A4', '#E76F51', '#C9A7C4'],
+    SUPER_BALL_COLOR: '#E9C46A',
+    MEGA_BALL_COLOR: '#E76F51',
+    CANNON: '#F4A261',
+    BG: '#241F2C',
+    BG_TOP: '#2B2534',
+    BG_PANEL: '#322B3B',
+    TEXT: '#FFF6EA',
 
     STORAGE_KEY: 'rf_roguelike_best_v2',
     TUTORIAL_KEY: 'rf_tutorial_seen_v2'

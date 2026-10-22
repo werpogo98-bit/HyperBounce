@@ -44,6 +44,8 @@
     shootTimer: 0,
     shotsLeft: 0,
     simTime: 0,
+    simClock: 0, // физическое время симуляции (учитывает ff-ускорение) — для честных кулдаунов ударов
+    hitAccum: null,
     ffIndex: 0,
     descendOffset: 0,
     targetDescendOffset: 0,
@@ -141,7 +143,9 @@
       virtual: 1,
       color: C.BALL_COLORS[_ballId % C.BALL_COLORS.length],
       collected: false,
-      squash: 0, stretch: 0
+      squash: 0, stretch: 0,
+      trail: [],
+      _hitTimes: {}
     };
   }
 
@@ -235,13 +239,16 @@
   }
 
   function hitBlock(ball, blk, nx, ny) {
-    // Кулдаун удара привязан к конкретному шарику, а не к блоку:
-    // он защищает от «двойного засчитывания» одного и того же шара за один кадр,
-    // но разные шарики могут бить блок одновременно.
     if (blk.dead) return;
-    if (ball._lastHitBlock === blk && ball._lastHitTime && performance.now() - ball._lastHitTime < 26) return;
-    ball._lastHitBlock = blk;
-    ball._lastHitTime = performance.now();
+    // Анти-спам привязан строго к паре (шар + блок) и измеряется в ФИЗИЧЕСКОМ
+    // времени симуляции, а не в wall-clock. Старая версия на performance.now()
+    // теряла попадания при ускорении игры (ff x2/x3.5) и при залпе из многих
+    // шаров — теперь каждое попадание каждого шара засчитывается честно.
+    const nowSim = G.simClock;
+    const last = ball._hitTimes && ball._hitTimes[blk.id];
+    if (last !== undefined && nowSim - last < 0.045) return;
+    if (!ball._hitTimes) ball._hitTimes = {};
+    ball._hitTimes[blk.id] = nowSim;
 
     let dmg = ball.damage * ball.virtual;
     let isCrit = Math.random() < G.critChance;
@@ -281,14 +288,18 @@
     ball.stretch = 0.5;
 
     const off = G.descendOffset;
-    const tag = isBackstab ? 'BACKSTAB ' + dmg : (isCrit ? 'CRIT ' + dmg : dmg);
-    const col = isBackstab ? '#FFD166' : (isCrit ? '#FF5D8F' : '#F4F6FF');
-    addFloater(blk.x + blk.w / 2, blk.y + off + 6, tag, col, isBackstab || isCrit ? 16 : 13);
-    spawnParticles(ball.x, ball.y, col, 4, 100);
+    // Залп шаров по одному блоку схлопывается в одну суммарную цифру (см. registerBlockHit)
+    const shown = registerBlockHit(blk, dmg, isCrit, isBackstab);
+    if (shown) {
+      const a = G.hitAccum.get(blk.id);
+      a.x = blk.x + blk.w / 2;
+      a.y = blk.y + off + 6;
+    }
+    spawnParticles(ball.x, ball.y, isBackstab ? '#FFCE7A' : (isCrit ? '#FF8FAE' : '#FFF6EA'), 4, 100);
     Sfx.hit();
 
     G.score += dmg;
-    if (blk.hp <= 0) destroyBlock(blk);
+    if (blk.hp <= 0) { flushBlockAccum(blk.id); destroyBlock(blk); }
   }
 
   function destroyBlock(blk) {
@@ -321,9 +332,63 @@
     }
   }
 
+  /**
+   * Всплывающие цифры урона. Если несколько шаров бьют один блок почти
+   * одновременно — вместо кучи наложенных друг на друга цифр показывается
+   * ОДНА суммарная ("3×12"), которая приподнимается над предыдущими,
+   * чтобы залп читался глазом, а не превращался в кашу.
+   */
   function addFloater(x, y, text, color, size) {
     if (G.floaters.length > 55) G.floaters.shift();
-    G.floaters.push({ x, y, text: String(text), color, size, t: 0, life: 0.8, vy: -45 });
+    // Небольшой случайный горизонтальный дрейф — даже одиночные цифры не слипаются в одну точку
+    const dx = (Math.random() - 0.5) * 46;
+    G.floaters.push({ x, y, text: String(text), color, size, t: 0, life: 0.9, vy: -45, dx });
+  }
+
+  const FLOOD_WINDOW = 0.3; // сек — окно «одновременных» попаданий по блоку
+  function registerBlockHit(blk, dmg, isCrit, isBackstab) {
+    if (!G.hitAccum) G.hitAccum = new Map();
+    const prev = G.hitAccum.get(blk.id);
+    if (prev && G.simClock - prev.t < FLOOD_WINDOW) {
+      prev.n++; prev.dmg += dmg; prev.t = G.simClock;
+      prev.crit = prev.crit || isCrit; prev.back = prev.back || isBackstab;
+      return null; // цифра уже на экране — копить, не спамить
+    }
+    G.hitAccum.set(blk.id, { n: 1, dmg, t: G.simClock, crit: isCrit, back: isBackstab });
+    return { key: blk.id };
+  }
+
+  function flushFloodFloaters() {
+    if (!G.hitAccum) return;
+    for (const [key, a] of G.hitAccum) {
+      if (G.simClock - a.t >= FLOOD_WINDOW) {
+        const tag = (a.n > 1 ? a.n + '×' : '') + (a.back ? '🛡BREAK ' : a.crit ? 'CRIT ' : '') + Math.round(a.dmg);
+        const col = a.back ? '#FFCE7A' : a.crit ? '#FF8FAE' : '#FFF6EA';
+        let fx = a.x, fy = a.y;
+        if (fx === undefined) {
+          const blk = G.blocks.find((b) => b.id === key);
+          if (blk) { fx = blk.x + blk.w / 2; fy = blk.y + G.descendOffset + 6; } else { fx = viewW / 2; fy = viewH * 0.3; }
+        }
+        // подсветка накопленного залапа
+        const lift = Math.min(3, a.n - 1) * 13;
+        addFloater(fx, fy - lift, tag, col, a.n > 1 ? 17 : (a.crit || a.back ? 16 : 13));
+        G.hitAccum.delete(key);
+      }
+    }
+  }
+
+  /** Немедленно показать накопленный урон по блоку (используется при его разрушении) */
+  function flushBlockAccum(blkId) {
+    if (!G.hitAccum) return;
+    const a = G.hitAccum.get(blkId);
+    if (!a) return;
+    const tag = (a.n > 1 ? a.n + '×' : '') + (a.back ? '🛡BREAK ' : a.crit ? 'CRIT ' : '') + Math.round(a.dmg);
+    const col = a.back ? '#FFCE7A' : a.crit ? '#FF8FAE' : '#FFF6EA';
+    const blk = G.blocks.find((b) => b.id === blkId);
+    const fx = blk ? blk.x + blk.w / 2 : viewW / 2;
+    const fy = (blk ? blk.y + G.descendOffset + 6 : viewH * 0.3) - Math.min(3, a.n - 1) * 13;
+    addFloater(fx, fy, tag, col, a.n > 1 ? 17 : (a.crit || a.back ? 16 : 13));
+    G.hitAccum.delete(blkId);
   }
 
   function pointerPos(e) {
@@ -471,6 +536,8 @@
 
   function update(dtReal) {
     const dt = dtReal * C.FF_LEVELS[G.ffIndex];
+    G.simClock += dt; // физическое время — эталон для кулдаунов и схлопывания цифр урона
+    flushFloodFloaters();
     updateEffects(dtReal);
     if (G.shake > 0) G.shake = Math.max(0, G.shake - dtReal * 28);
 
@@ -509,7 +576,7 @@
         }
 
         // Проверяем нижнюю границу живых блоков относительно красной линии поражения
-        const dangerY = launchY - 26;
+        const dangerY = launchY - 52; // синхронно с отрисовкой: линия отделена от пушки
         let maxY = -Infinity;
         for (const blk of G.blocks) {
           if (blk.dead) continue;
@@ -547,10 +614,14 @@
     };
 
     for (let s = 0; s < steps; s++) {
-      for (let i = G.balls.length - 1; i >= 0; i--) {
+    for (let i = G.balls.length - 1; i >= 0; i--) {
         const b = G.balls[i];
         Phys.stepBall(b, sdt, shifted, viewW, viewH, floorY, events);
         checkGates(b);
+        // Обновление шлейфа: позиция добавляется раз в кадр физики
+        if (!b.trail) b.trail = [];
+        b.trail.push({ x: b.x, y: b.y });
+        if (b.trail.length > 6) b.trail.shift();
         if (b.collected) G.balls.splice(i, 1);
       }
     }
@@ -577,7 +648,11 @@
     }
     for (let i = G.floaters.length - 1; i >= 0; i--) {
       const f = G.floaters[i];
-      f.t += dt; f.y += f.vy * dt;
+      f.t += dt;
+      // Замедление всплытия + лёгкий «дрейф» в сторону — цифры не слипаются в колонну
+      const ease = Math.max(0.25, 1 - f.t / f.life);
+      f.y += f.vy * dt * ease;
+      f.x += (f.dx || 0) * dt * ease;
       if (f.t >= f.life) G.floaters.splice(i, 1);
     }
     for (let i = G.lasers.length - 1; i >= 0; i--) {
@@ -619,16 +694,39 @@
       ctx.translate((Math.random() - 0.5) * G.shake, (Math.random() - 0.5) * G.shake);
     }
 
-    ctx.fillStyle = C.BG;
+    // Мягкий тёплый градиент вместо плоского фона (щадит глаза, без кислотно-неона)
+    const bgGrad = ctx.createLinearGradient(0, 0, 0, viewH);
+    bgGrad.addColorStop(0, C.BG_TOP);
+    bgGrad.addColorStop(1, C.BG);
+    ctx.fillStyle = bgGrad;
     ctx.fillRect(-40, -40, viewW + 80, viewH + 80);
 
-    // Линия поражения
-    const dangerY = launchY - 26;
+    // Зона пушки — отдельный «карман», визуально отделённый от поля и линии поражения
+    const dangerY = launchY - 52; // раньше было launchY - 26: линия липла к пушке
     ctx.save();
-    ctx.strokeStyle = 'rgba(229,72,77,' + (0.35 + G.dangerPulse * 0.55) + ')';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([8, 6]);
+    const zoneGrad = ctx.createLinearGradient(0, dangerY, 0, viewH);
+    zoneGrad.addColorStop(0, 'rgba(255,255,255,0.025)');
+    zoneGrad.addColorStop(1, 'rgba(255,255,255,0.07)');
+    ctx.fillStyle = zoneGrad;
+    ctx.fillRect(0, dangerY, viewW, viewH - dangerY);
+    ctx.restore();
+
+    // Линия поражения: пунктир + мягкое свечение, усиливается при опасности
+    const pulseNow = performance.now() / 1000;
+    const glow = 0.3 + G.dangerPulse * (0.45 + Math.sin(pulseNow * 6) * 0.15);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,122,110,' + Math.min(0.95, glow + 0.15) + ')';
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([9, 7]);
+    ctx.shadowColor = 'rgba(255,122,110,0.8)';
+    ctx.shadowBlur = 6 + G.dangerPulse * 14;
     ctx.beginPath(); ctx.moveTo(6, dangerY); ctx.lineTo(viewW - 6, dangerY); ctx.stroke();
+    ctx.restore();
+    // Тонкая разделительная линия между зоной поля и зоной пушки
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, dangerY + 7); ctx.lineTo(viewW, dangerY + 7); ctx.stroke();
     ctx.restore();
 
     drawBlocks();
@@ -655,19 +753,40 @@
       const w = blk.w * (1 + sq), h = blk.h * (1 - sq);
       const x = blk.x - (w - blk.w) / 2;
       const col = blk.tnt ? C.TNT_COLOR : (blk.boss ? C.BOSS_COLOR : C.heatColor(blk.hp, G.maxWaveBlockHp));
+      // Плавное «подтаивание» цвета при уроне: блок светлеет пропорционально flash
+      const dmgShade = Math.max(0, blk.flash) * 0.55;
 
       ctx.save();
-      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.fillStyle = 'rgba(0,0,0,0.30)';
       if (blk.type === 'tri') { drawTriShape(x + 2, y + 4, w, h, blk.cut); ctx.fill(); }
       else { roundRectPath(x + 2, y + 4, w, h, C.BLOCK_RADIUS); ctx.fill(); }
 
-      ctx.fillStyle = blk.flash > 0.2 ? '#FFFFFF' : col;
+      // Мягкое внутреннее свечение вместо криичного неона
+      ctx.shadowColor = col;
+      ctx.shadowBlur = 4 + blk.flash * 10;
+      ctx.fillStyle = col;
       if (blk.type === 'tri') { drawTriShape(x, y, w, h, blk.cut); ctx.fill(); }
       else { roundRectPath(x, y, w, h, C.BLOCK_RADIUS); ctx.fill(); }
+      ctx.shadowBlur = 0;
+
+      // Верхний блик — блок выглядит объёмным
+      ctx.globalAlpha = 0.28;
+      ctx.fillStyle = '#FFFFFF';
+      if (blk.type !== 'tri') { roundRectPath(x + 3, y + 3, w - 6, h * 0.34, C.BLOCK_RADIUS - 2); ctx.fill(); }
+      ctx.globalAlpha = 1;
+
+      // Вспышка от попадания (полупрозрачная, не «выбеливает» блок целиком)
+      if (dmgShade > 0.02) {
+        ctx.globalAlpha = dmgShade;
+        ctx.fillStyle = '#FFF3E4';
+        if (blk.type === 'tri') { drawTriShape(x, y, w, h, blk.cut); ctx.fill(); }
+        else { roundRectPath(x, y, w, h, C.BLOCK_RADIUS); ctx.fill(); }
+        ctx.globalAlpha = 1;
+      }
 
       // Нижний бронещит (показывает, что снизу бить невыгодно, а сверху — 2x урон!)
       if (blk.shielded) {
-        ctx.fillStyle = '#E2E8F0';
+        ctx.fillStyle = '#D9CBB8';
         ctx.fillRect(x + 2, y + h - 5, w - 4, 5);
       }
 
@@ -680,9 +799,9 @@
       ctx.font = 'bold 12px system-ui, sans-serif';
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.lineWidth = 3;
-      ctx.strokeStyle = 'rgba(20,22,40,0.9)';
+      ctx.strokeStyle = 'rgba(26,23,20,0.85)';
       ctx.strokeText(label, tx, ty);
-      ctx.fillStyle = '#FFFFFF';
+      ctx.fillStyle = '#FFFDF7';
       ctx.fillText(label, tx, ty);
       ctx.restore();
     }
@@ -727,18 +846,30 @@
   }
 
   function drawLauncher() {
+    const t = performance.now() / 1000;
     ctx.save();
+    // Основание пушки — тёплый шоколадный, отделён от линии поражения зазором
     ctx.fillStyle = C.BG_PANEL;
-    roundRectPath(launchX - 30, launchY - 6, 60, 26, 8);
+    roundRectPath(launchX - 32, launchY - 4, 64, 28, 10);
     ctx.fill();
-    ctx.strokeStyle = '#4CC9F0';
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = C.CANNON;
+    ctx.lineWidth = 2.5;
     ctx.stroke();
 
-    ctx.translate(launchX, launchY);
+    // Дуло: скруглённый «ствол» с мягким свечением и лёгким дыханием в режиме прицела
+    ctx.translate(launchX, launchY - 2);
+    const breathe = G.state === ST.AIMING ? 1 + Math.sin(t * 3) * 0.03 : 1;
     ctx.rotate(G.aimAngle + Math.PI / 2);
-    ctx.fillStyle = '#4CC9F0';
-    roundRectPath(-6, -28, 12, 28, 5);
+    ctx.scale(breathe, breathe);
+    ctx.shadowColor = C.CANNON;
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = C.CANNON;
+    roundRectPath(-7, -30, 14, 32, 6);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    // Срез дула
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    roundRectPath(-4.5, -30, 9, 6, 3);
     ctx.fill();
     ctx.restore();
   }
@@ -747,27 +878,56 @@
     const segs = Phys.previewPath(launchX, launchY, G.aimAngle, liveBlocksShifted(), viewW, viewH);
     const pts = segs[0];
     if (!pts || pts.length < 2) return;
+    const t = performance.now() / 1000;
     ctx.save();
-    ctx.strokeStyle = 'rgba(244,246,255,0.88)';
+    ctx.strokeStyle = 'rgba(255,246,234,0.85)';
     ctx.lineWidth = 2.5;
-    ctx.setLineDash([3, 9]);
+    ctx.lineCap = 'round';
+    ctx.setLineDash([2, 10]);
+    ctx.lineDashOffset = -t * 26; // «бегущий» пунктир — видно направление полёта
     ctx.beginPath();
     ctx.moveTo(pts[0].x, pts[0].y);
     for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
     ctx.stroke();
 
+    // Маркер точки первого касания — дышащее кольцо + мягкое свечение
     const last = pts[pts.length - 1];
+    const pr = 6 + Math.sin(t * 5) * 1.4;
     ctx.setLineDash([]);
-    ctx.strokeStyle = '#FFD166';
-    ctx.beginPath(); ctx.arc(last.x, last.y, 6, 0, Math.PI * 2); ctx.stroke();
+    ctx.shadowColor = '#FFCE7A';
+    ctx.shadowBlur = 10;
+    ctx.strokeStyle = '#FFCE7A';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(last.x, last.y, pr, 0, Math.PI * 2); ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = 'rgba(255,206,122,0.9)';
+    ctx.beginPath(); ctx.arc(last.x, last.y, 2.2, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
   }
 
   function drawBalls() {
     for (const b of G.balls) {
+      // Хвост-шлейф для приятного движения
+      if (b.trail && b.trail.length) {
+        ctx.save();
+        for (let i = 0; i < b.trail.length; i++) {
+          const p = b.trail[i];
+          const k = (i + 1) / (b.trail.length + 1);
+          ctx.globalAlpha = 0.16 * k;
+          ctx.fillStyle = b.color;
+          ctx.beginPath(); ctx.arc(p.x, p.y, b.r * k * 0.9, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.restore();
+      }
       ctx.save();
+      ctx.shadowColor = b.color;
+      ctx.shadowBlur = 6;
       ctx.fillStyle = b.color;
       ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+      // Блик
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.beginPath(); ctx.arc(b.x - b.r * 0.32, b.y - b.r * 0.34, b.r * 0.34, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
     }
   }
@@ -786,8 +946,15 @@
     ctx.save();
     ctx.textAlign = 'center';
     for (const f of G.floaters) {
-      ctx.globalAlpha = Math.max(0, 1 - f.t / f.life);
-      ctx.font = 'bold ' + f.size + 'px system-ui, sans-serif';
+      const k = f.t / f.life;
+      // Появление с «отскоком»: первые 12% жизни цифра подрастает в размере
+      const pop = k < 0.12 ? 0.7 + (k / 0.12) * 0.35 : 1.05 - (k - 0.12) * 0.05;
+      const alpha = k > 0.6 ? Math.max(0, 1 - (k - 0.6) / 0.4) : 1;
+      ctx.globalAlpha = alpha;
+      ctx.font = 'bold ' + Math.round(f.size * pop) + 'px system-ui, sans-serif';
+      ctx.lineWidth = 3.5;
+      ctx.strokeStyle = 'rgba(26,23,20,0.85)';
+      ctx.strokeText(f.text, f.x, f.y);
       ctx.fillStyle = f.color;
       ctx.fillText(f.text, f.x, f.y);
     }
@@ -969,6 +1136,38 @@
 
   global.RF = global.RF || {};
   global.RF.Game = { boot: boot, G: G, ST: ST };
+
+  // Отладочные хуки (только локально, см. dev/dev.html) — в проде не используются
+  global.RF.debug = {
+    /** Перепрыгнуть на волну N и перестроить поле */
+    gotoWave(n) {
+      G.wave = Math.max(1, n | 0);
+      G.waveSeed = 0;
+      G.descendOffset = 0;
+      G.targetDescendOffset = 0;
+      G.balls = [];
+      nextWave();
+      setState(ST.AIMING);
+      refreshShop();
+      return 'wave=' + G.wave;
+    },
+    addCoins(v) { G.coins += v | 0; uiHud(); refreshShop(); return 'coins=' + G.coins; },
+    setBalls(v) {
+      G.upgrades.count = Math.max(0, v | 0);
+      recomputeStats(); uiHud(); refreshShop();
+      return 'volley=' + G.volleyCount;
+    },
+    setDamage(v) {
+      G.upgrades.damage = Math.max(0, v | 0);
+      recomputeStats(); uiHud(); refreshShop();
+      return 'dmg=' + G.baseDamage;
+    },
+    /** Мгновенно уничтожить все блоки текущей волны */
+    clearWave() {
+      for (const b of G.blocks) if (!b.dead) destroyBlock(b);
+      return 'blocks cleared';
+    }
+  };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
