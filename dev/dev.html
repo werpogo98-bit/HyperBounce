@@ -19,21 +19,24 @@
 <body>
   <div id="bar">
     <b>DEV</b>
-    <button onclick="act(() => RF.debug.addCoins(500))">+500 💰</button>
-    <button onclick="act(() => RF.debug.addCoins(99999))">+99999 💰</button>
+    <button onclick="act(w => w.RF.debug.addCoins(500))">+500 💰</button>
+    <button onclick="act(w => w.RF.debug.addCoins(99999))">+99999 💰</button>
     <input id="waveN" type="number" value="68" min="1" />
-    <button onclick="act(() => RF.debug.gotoWave(+document.getElementById('waveN').value))">→ Волна N</button>
-    <button onclick="act(() => RF.debug.gotoWave(68))">⏭ 68 волна</button>
-    <button onclick="act(() => RF.debug.setBalls(12))">Шаров = 12</button>
-    <button onclick="act(() => RF.debug.setDamage(9))">Урон = 9</button>
-    <button onclick="act(() => RF.debug.clearWave())">💥 Зачистить блок</button>
+    <button onclick="act(w => w.RF.debug.gotoWave(+document.getElementById('waveN').value))">→ Волна N</button>
+    <button onclick="act(w => w.RF.debug.gotoWave(68))">⏭ 68 волна</button>
+    <button onclick="act(w => w.RF.debug.setBalls(12))">Шаров = 12</button>
+    <button onclick="act(w => w.RF.debug.setDamage(9))">Урон = 9</button>
+    <button onclick="act(w => w.RF.debug.clearWave())">💥 Зачистить блок</button>
   </div>
   <iframe id="gameFrame" src="../index.html?dev=1"></iframe>
   <div id="log"></div>
   <script>
     function act(fn) {
       const w = document.getElementById('gameFrame').contentWindow;
-      try { log(String(fn.call(w)) + '  ✔'); }
+      try {
+        if (!w || !w.RF || !w.RF.debug) { log('Игра ещё не загрузилась — подождите пару секунд'); return; }
+        log(String(fn(w)) + '  ✔');
+      }
       catch (e) { log('Ошибка: ' + e.message); }
     }
     function log(s) { document.getElementById('log').textContent = s; setTimeout(() => { document.getElementById('log').textContent = ''; }, 2500); }
