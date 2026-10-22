@@ -72,7 +72,7 @@
     const R = ball.r + pad;
     // быстрый AABB-отсев
     if (ball.x < x - R || ball.x > x + w + R || ball.y < y - R || ball.y > y + h + R) return false;
-    const v = triVerts(blk);
+    const v = triVertsCached(blk);
     if (!v) return true;
     for (let i = 0; i < 3; i++) {
       const a = v[i], b = v[(i + 1) % 3];
@@ -92,6 +92,21 @@
       if (d > bestD) { bestD = d; best = [i, (i + 1) % 3]; }
     }
     return best;
+  }
+
+  // Кэш вершин: triVerts вызывается из узкой фазы, выталкивания и предпросмотра
+  // прицела по несколько раз на каждый подшаг каждого шара. При 150+ шарах и
+  // ускорении 3.5x это становилось заметной нагрузкой на бюджетных телефонах.
+  // Ключевые поля блока (x/y/_sy/w/h/cut/dead) за кадр не меняются, поэтому
+  // пересчёт делаем только при их изменении.
+  function triVertsCached(blk) {
+    const sy = blk._sy !== undefined ? blk._sy : blk.y;
+    const key = blk.x + '|' + sy + '|' + blk.w + '|' + blk.h + '|' + blk.cut;
+    if (blk._tvKey === key && blk._tv) return blk._tv;
+    const v = triVerts(blk);
+    blk._tvKey = key;
+    blk._tv = v;
+    return v;
   }
 
   // Ближайшая точка на отрезке AB к точке P + вектор расталкивания
@@ -198,7 +213,7 @@
   }
 
   Physics.triHit = function (ball, blk) {
-    const verts = triVerts(blk);
+    const verts = triVertsCached(blk);
     if (!verts) return null;
     // ВАЖНО: проверка «внутри» должна учитывать РАДИУС шара, а не только центр.
     // Если весь круг шара лежит внутри треугольника (туннелирование на высокой
@@ -232,7 +247,7 @@
   // Столкновение шара с треугольным блоком.
   function collideTriBlock(ball, blk, by) {
     const cfg = C();
-    const v0 = triVerts(blk);
+    const v0 = triVertsCached(blk);
     const wasInside = v0 ? pointInTri(ball.x, ball.y, v0) : false;
     const hit = Physics.triHit(ball, blk);
     if (hit) {
@@ -277,7 +292,7 @@
       for (let i = 0; i < blocks.length; i++) {
         const blk = blocks[i];
         if (blk.dead || blk.type !== 'tri') continue;
-        const v = triVerts(blk);
+        const v = triVertsCached(blk);
         if (!v || !pointInTri(ball.x, ball.y, v)) continue;
         const hit = Physics.triHit(ball, blk);
         if (!hit) continue;
@@ -294,14 +309,29 @@
   // пикселей — иначе он «телепортируется» сквозь тонкие стенки и застревает
   // внутри блоков. Раньше шаг был фиксированным (dt/2), при скорости ~1000
   // это давало ~4 px/шаг против шара радиусом 6.5 — отсюда залёты внутрь.
+  // Потолок подшагов НЕ статичный: он растёт вместе со скоростью шара
+  // (и, соответственно, при ускорении 2x/3.5x SPEED, когда физический шаг
+  // кадра увеличивается). На обычной скорости поведение идентично прежнему,
+  // а на экстремальных скоростях точность коллизий автоматически повышается.
   function substepsFor(ball, dt) {
+    const cfg = C();
     const sp = Math.hypot(ball.vx, ball.vy);
+    // Жёсткое требование CCD: за один подшаг шар не должен проходить больше
+    // половины своего радиуса — иначе может «перепрыгнуть» тонкий угол блока.
     const maxMove = Math.max(2, ball.r * 0.5);
     const need = Math.ceil((sp * dt) / maxMove);
-    return Math.min(8, Math.max(C().SUBSTEPS_PER_STEP, need));
+    // Потолок (cap) растёт плавно со скоростью шара: на обычной (~350 px/s)
+    // он равен прежнему статичному значению SUBSTEPS_PER_STEP, поэтому
+    // поведение 1x скорости НЕ меняется. При ускорении 2x/3.5x и разгоне
+    // шаров потолок автоматически повышается вплоть до SUBSTEPS_MAX_CAP,
+    // пропуская тяжёлые подшаги только там, где они реально нужны.
+    const t = Math.max(0, sp - cfg.SUBSTEPS_BASE_SPEED) / cfg.SUBSTEPS_SPEED_REF;
+    const cap = Math.min(cfg.SUBSTEPS_MAX_CAP,
+      Math.round(cfg.SUBSTEPS_MIN_CAP + (cfg.SUBSTEPS_MAX_CAP - cfg.SUBSTEPS_MIN_CAP) * Math.min(1, t)));
+    return Math.min(cap, Math.max(cfg.SUBSTEPS_PER_STEP, need));
   }
 
-  Physics.stepBall = function (ball, dt, blocks, worldW, worldH, floorY, events) {
+  function stepBall(ball, dt, blocks, worldW, worldH, floorY, events) {
     const cfg = C();
     const subs = substepsFor(ball, dt);
     const h = dt / subs;
@@ -385,7 +415,7 @@
     }
   };
 
-  Physics.previewPath = function (launchX, launchY, angle, blocks, worldW, worldH) {
+  function previewPath (launchX, launchY, angle, blocks, worldW, worldH) {
     const cfg = C();
     const MO = cfg.MUZZLE_OFFSET;
     const fake = {
@@ -417,7 +447,10 @@
       if ((i & 1) === 0) seg.push({ x: fake.x, y: fake.y });
     }
     return [seg];
-  };
+  }
+
+  Physics.stepBall = stepBall;
+  Physics.previewPath = previewPath;
 
   global.RF = global.RF || {};
   global.RF.Physics = Physics;

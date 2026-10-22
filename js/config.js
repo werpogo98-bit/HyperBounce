@@ -3,6 +3,8 @@
 
   const Config = {
     COLS: 7,
+    // Динамическая плотность поля по волнам (0-база): [от волны, cols, rows]
+    GRID_PHASES: [[25, 9, 7], [10, 8, 6], [1, 7, 5]],
     GRID_TOP_FRAC: 0.10,
     GRID_BOTTOM_FRAC: 0.56,
     CELL_GAP: 4,
@@ -28,7 +30,21 @@
 
     FIXED_DT: 1 / 120,
     SUBSTEPS_PER_STEP: 2,
+    // Динамический потолок подшагов: пока скорость шара не превышает
+    // SUBSTEPS_BASE_SPEED, потолок равен SUBSTEPS_MIN_CAP — в точности как
+    // прежняя константа 8, поэтому поведение на 1x НЕ меняется. Выше этого
+    // порога (разгон гравитацией, ускорение 2x/3.5x SPEED) потолок плавно
+    // растёт до SUBSTEPS_MAX_CAP — точность коллизий повышается там, где
+    // появляется риск туннелирования сквозь тонкие углы tri-блоков.
+    SUBSTEPS_MIN_CAP: 8,        // базовый потолок (прежнее статичное значение)
+    SUBSTEPS_BASE_SPEED: 700,   // px/s: до этой скорости всё как раньше (cap = 8)
+    SUBSTEPS_SPEED_REF: 450,    // темп роста потолка выше BASE_SPEED
+    SUBSTEPS_MAX_CAP: 16,       // жёсткий верх для слабых смартфонов
     MAX_STEPS_PER_FRAME: 6,
+    // При ускорении 2x/3.5x число макро-шагов физики в кадре тоже растёт,
+    // иначе sdt увеличивается и «динамические подшаги» не спасают от
+    // туннелирования сквозь тонкие углы треугольных блоков.
+    FF_STEPS_SCALE: true,       // множить MAX_STEPS_PER_FRAME на текущий FF-множитель
 
     FF_AFTER_S: 3.5,
     FF_LEVELS: [1, 2, 3.5],
@@ -54,25 +70,31 @@
     UPGRADES: {
       count: {
         label: '+Balls', icon: '⚪',
-        baseCost: 14, costMult: 1.36, maxLevel: 25,
+        baseCost: 14, costMult: 1.28, maxLevel: 60,
         desc: '+1 ball per volley'
       },
       damage: {
         label: '+Damage', icon: '💥',
-        baseCost: 12, costMult: 1.34, maxLevel: 30,
-        desc: '+1.5 base damage'
+        baseCost: 12, costMult: 1.28, maxLevel: 999,
+        desc: '+1.5 base damage (x1.25 каждые 5 ур.)'
       },
       crit: {
         label: '+Crit/Armor', icon: '⚡',
-        baseCost: 18, costMult: 1.42, maxLevel: 15,
+        baseCost: 18, costMult: 1.28, maxLevel: 25,
         desc: '+4% crit & shield pierce'
       },
       blast: {
         label: '+Shockwave', icon: '💣',
-        baseCost: 24, costMult: 1.48, maxLevel: 12,
+        baseCost: 24, costMult: 1.28, maxLevel: 30,
         desc: 'Every 8th hit blasts area'
       }
     },
+
+    /* Milestone-бонусы бесконечного магазина */
+    DMG_MILESTONE_EVERY: 5,      // каждые 5 уровней damage...
+    DMG_MILESTONE_MULT: 1.25,    // ...мультипликативный бонус x1.25
+    CHAIN_LIGHTNING_BLAST_LVL: 5, // blast Lv5: взрыв пускает цепную молнию в случайный блок
+    CHAIN_LIGHTNING_DMG_RATIO: 0.5, // урон молнии = 50% от splash
 
     HEATMAP: [
       '#7FB8A4', // приглушённая мята — низкий HP
@@ -110,8 +132,16 @@
   /** Целевой суммарный пул HP всей волны (чтобы требовалось 6-7 залпов, минимум 4 идеальных) */
   Config.targetWaveTotalHp = function (wave, isBoss) {
     const volley = Config.expectedVolleyDamage(wave);
-    const targetShots = isBoss ? 7.8 : (wave <= 2 ? 5.2 : 6.4);
+    const targetShots = isBoss ? 7.8 : (wave <= 9 ? 5.2 : 6.4);
     return Math.round(volley * targetShots);
+  };
+
+  /** Динамическая плотность поля: волны 1-9 => 7x5, 10-24 => 8x6, 25+ => 9x7 */
+  Config.gridSize = function (wave) {
+    for (const [fromWave, cols, rows] of Config.GRID_PHASES) {
+      if (wave >= fromWave) return { cols, rows };
+    }
+    return { cols: Config.COLS, rows: 5 };
   };
 
   Config.heatColor = function (hp, maxWaveHp) {

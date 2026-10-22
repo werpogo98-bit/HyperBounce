@@ -37,7 +37,11 @@
     upgrades: { count: 0, damage: 0, crit: 0, blast: 0 },
     volleyCount: C.START_BALLS,
     baseDamage: C.START_DAMAGE,
+    dmgMult: 1,
     critChance: C.START_CRIT,
+    comboHits: 0,      // удары по блокам за текущий залп (для фонового комбо-счётчика)
+    comboPulse: 0,     // время последнего удара — для пульсации текста
+    hitstopT: 0,       // остаток микро-заморозки кадра (hitstop) при больших комбо
     aimAngle: -Math.PI / 2,
     aiming: false,
     hasPointer: false,
@@ -79,7 +83,10 @@
 
   function recomputeStats() {
     G.volleyCount = C.START_BALLS + G.upgrades.count;
-    G.baseDamage = C.START_DAMAGE + G.upgrades.damage * 1.5;
+    // Milestone: каждые 5 уровней damage — мультипликативный бонус x1.25 к базовому урону
+    const milestones = Math.floor(G.upgrades.damage / C.DMG_MILESTONE_EVERY);
+    G.dmgMult = Math.pow(C.DMG_MILESTONE_MULT, milestones);
+    G.baseDamage = (C.START_DAMAGE + G.upgrades.damage * 1.5) * G.dmgMult;
     G.critChance = C.START_CRIT + G.upgrades.crit * 0.04;
   }
 
@@ -134,6 +141,31 @@
     return false;
   }
 
+  /** Элитные целители (healer): в конце каждого хода лечат живых соседей на 15% maxHp */
+  function healerEndOfTurn() {
+    let anyHealed = false;
+    for (const h of G.blocks) {
+      if (h.dead || !h.healer) continue;
+      for (const b of G.blocks) {
+        if (b.dead || b === h) continue;
+        // соседство по сетке: касается или стоит вплотную (зазор <= CELL_GAP*2)
+        const nearX = Math.abs((h.x + h.w / 2) - (b.x + b.w / 2)) <= (h.w + b.w) / 2 + C.CELL_GAP * 2;
+        const nearY = Math.abs((h.y + h.h / 2) - (b.y + b.h / 2)) <= (h.h + b.h) / 2 + C.CELL_GAP * 2;
+        if (!(nearX && nearY)) continue;
+        const before = b.hp;
+        b.hp = Math.min(b.maxHp, b.hp + b.maxHp * 0.15);
+        if (b.hp > before + 0.5) {
+          anyHealed = true;
+          b.flash = 1;
+          addFloater(b.x + b.w / 2, b.y + G.descendOffset, '+HEAL', '#7FBF8A', 12);
+        }
+      }
+    }
+    if (anyHealed) {
+      addFloater(viewW / 2, launchY - C.LAUNCH_ZONE_H, '➕ HEALER RESTORED NEIGHBORS — KILL IT FIRST!', '#7FBF8A', 13);
+    }
+  }
+
   let _ballId = 1;
   function makeBall(x, y, vx, vy, damage) {
     return {
@@ -142,6 +174,7 @@
       damage: damage,
       virtual: 1,
       color: C.BALL_COLORS[_ballId % C.BALL_COLORS.length],
+      tier: Math.floor(G.upgrades.damage / C.DMG_MILESTONE_EVERY), // визуальная эволюция шара (milestone damage)
       collected: false,
       squash: 0, stretch: 0,
       trail: [],
@@ -279,6 +312,22 @@
           if (nb.hp <= 0) destroyBlock(nb);
         }
       }
+      // Milestone blast Lv5+: цепная молния в случайный блок на карте
+      if (G.upgrades.blast >= C.CHAIN_LIGHTNING_BLAST_LVL) {
+        const alive = G.blocks.filter((b) => !b.dead && b !== blk);
+        if (alive.length) {
+          const target = alive[Math.floor(Math.random() * alive.length)];
+          const zOff = G.descendOffset;
+          const tx = target.x + target.w / 2, ty = target.y + zOff + target.h / 2;
+          addZap(ball.x, ball.y, tx, ty);
+          const zDmg = Math.max(1, Math.round(splash * C.CHAIN_LIGHTNING_DMG_RATIO));
+          target.hp -= zDmg;
+          target.flash = 1;
+          addFloater(tx, ty, '-' + zDmg, '#FFE9A8', 13);
+          spawnParticles(tx, ty, '#FFE9A8', 8, 130);
+          if (target.hp <= 0) destroyBlock(target);
+        }
+      }
     }
 
     dmg = Math.max(1, Math.round(dmg));
@@ -299,6 +348,18 @@
     Sfx.hit();
 
     G.score += dmg;
+
+    // Комбо за залп: +1 на каждый удар шарика по живому блоку.
+    // На порогах комбо включается hitstop — крошечная микро-заморозка кадра
+    // (только визуал: физическое время и кулдауны считаются по simClock).
+    if (!blk.dead) {
+      G.comboHits++;
+      G.comboPulse = performance.now();
+      const c = G.comboHits;
+      if (c === 50 || c === 120 || c === 250) G.hitstopT = 0.035;
+      else if (c > 250 && c % 40 === 0) G.hitstopT = 0.03;
+    }
+
     if (blk.hp <= 0) { flushBlockAccum(blk.id); destroyBlock(blk); }
   }
 
@@ -343,6 +404,22 @@
     // Небольшой случайный горизонтальный дрейф — даже одиночные цифры не слипаются в одну точку
     const dx = (Math.random() - 0.5) * 46;
     G.floaters.push({ x, y, text: String(text), color, size, t: 0, life: 0.9, vy: -45, dx });
+  }
+
+  /** Визуальная цепная молния (blast Lv5+): зигзаг от точки A к точке B */
+  function addZap(x1, y1, x2, y2) {
+    if (!G.zaps) G.zaps = [];
+    if (G.zaps.length > 8) G.zaps.shift();
+    const pts = [{ x: x1, y: y1 }];
+    const segs = 5;
+    for (let i = 1; i < segs; i++) {
+      const k = i / segs;
+      const px = x1 + (x2 - x1) * k + (Math.random() - 0.5) * 22;
+      const py = y1 + (y2 - y1) * k + (Math.random() - 0.5) * 22;
+      pts.push({ x: px, y: py });
+    }
+    pts.push({ x: x2, y: y2 });
+    G.zaps.push({ pts, t: 0, life: 0.25 });
   }
 
   const FLOOD_WINDOW = 0.3; // сек — окно «одновременных» попаданий по блоку
@@ -440,6 +517,7 @@
     G.shotsLeft = G.volleyCount;
     G.shootTimer = 0;
     G.simTime = 0;
+    G.comboHits = 0;   // новый залп — комбо-счётчик начинается с нуля
     G.ffIndex = 0;
     G.ballsTotal = G.volleyCount;
     setState(ST.FIRING);
@@ -526,8 +604,11 @@
     G.particles = [];
     G.floaters = [];
     G.lasers = [];
+    G.zaps = [];
     G.overShown = false;
     G.waveSeed = 0;
+    G.comboHits = 0;
+    G.hitstopT = 0;
     nextWave();
     setState(ST.AIMING);
     uiHideGameOver();
@@ -535,6 +616,13 @@
   }
 
   function update(dtReal) {
+    // Hitstop: микро-заморозка кадра при больших комбо (визуальный «вес» удара).
+    // Физическое время (simClock) и таймеры залпа в этот момент не идут,
+    // поэтому траектории и кулдауны остаются абсолютно идентичными.
+    if (G.hitstopT > 0) {
+      G.hitstopT = Math.max(0, G.hitstopT - dtReal);
+      return;
+    }
     const dt = dtReal * C.FF_LEVELS[G.ffIndex];
     G.simClock += dt; // физическое время — эталон для кулдаунов и схлопывания цифр урона
     flushFloodFloaters();
@@ -588,6 +676,7 @@
         if (maxY >= dangerY) {
           setState(ST.GAMEOVER);
         } else if (G.descendOffset >= G.targetDescendOffset - 0.5) {
+          healerEndOfTurn();
           setState(ST.AIMING);
         }
         break;
@@ -600,7 +689,12 @@
 
   function stepPhysics(dt) {
     if (dt <= 0) return;
-    const steps = Math.min(C.MAX_STEPS_PER_FRAME, Math.max(1, Math.ceil(dt / C.FIXED_DT)));
+    // При активном ускорении (2x/3.5x SPEED) число макро-шагов физики в кадре
+    // масштабируется вместе с множителем, иначе sdt растёт и быстрые шары
+    // могут проскакивать тонкие углы треугольных блоков на слабых телефонах.
+    const ffMult = C.FF_LEVELS[G.ffIndex] || 1;
+    const maxSteps = C.FF_STEPS_SCALE ? Math.ceil(C.MAX_STEPS_PER_FRAME * Math.max(1, ffMult)) : C.MAX_STEPS_PER_FRAME;
+    const steps = Math.min(maxSteps, Math.max(1, Math.ceil(dt / C.FIXED_DT)));
     const sdt = dt / steps;
     const shifted = liveBlocksShifted();
 
@@ -658,6 +752,12 @@
     for (let i = G.lasers.length - 1; i >= 0; i--) {
       G.lasers[i].t += dt;
       if (G.lasers[i].t >= G.lasers[i].life) G.lasers.splice(i, 1);
+    }
+    if (G.zaps) {
+      for (let i = G.zaps.length - 1; i >= 0; i--) {
+        G.zaps[i].t += dt;
+        if (G.zaps[i].t >= G.zaps[i].life) G.zaps.splice(i, 1);
+      }
     }
     for (const blk of G.blocks) {
       if (blk.flash > 0) blk.flash = Math.max(0, blk.flash - dt * 4);
@@ -732,10 +832,12 @@
     drawBlocks();
     drawGates();
     drawLasers();
+    drawZaps();
     drawLauncher();
     if (G.state === ST.AIMING) drawAimPreview();
     drawBalls();
     drawParticles();
+    drawComboMeter();
     drawFloaters();
 
     ctx.restore();
@@ -790,6 +892,17 @@
         ctx.fillRect(x + 2, y + h - 5, w - 4, 5);
       }
 
+      // Элитный блок-целитель: зеленая рамка + крест ➕
+      if (blk.healer) {
+        ctx.strokeStyle = '#7FBF8A';
+        ctx.lineWidth = 2.5;
+        roundRectPath(x + 1.5, y + 1.5, w - 3, h - 3, C.BLOCK_RADIUS);
+        ctx.stroke();
+        ctx.font = 'bold 10px system-ui, sans-serif';
+        ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+        ctx.fillText('➕', x + 3, y + 2);
+      }
+
       let tx = x + w / 2, ty = y + h / 2;
       if (blk.type === 'tri') {
         tx = x + w * (blk.cut === 'tl' || blk.cut === 'bl' ? 0.65 : 0.35);
@@ -841,6 +954,24 @@
       ctx.fillStyle = '#4CC9F0';
       ctx.fillRect(0, l.y - 6 * k, viewW, 12 * k);
       ctx.fillRect(l.x - 6 * k, 0, 12 * k, viewH);
+      ctx.restore();
+    }
+  }
+
+  function drawZaps() {
+    if (!G.zaps || !G.zaps.length) return;
+    for (const z of G.zaps) {
+      const k = 1 - z.t / z.life;
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, k);
+      ctx.strokeStyle = '#FFE9A8';
+      ctx.lineWidth = 2.2;
+      ctx.shadowColor = '#FFD9A0';
+      ctx.shadowBlur = 10;
+      ctx.beginPath();
+      ctx.moveTo(z.pts[0].x, z.pts[0].y);
+      for (let i = 1; i < z.pts.length; i++) ctx.lineTo(z.pts[i].x, z.pts[i].y);
+      ctx.stroke();
       ctx.restore();
     }
   }
@@ -920,16 +1051,77 @@
         ctx.restore();
       }
       ctx.save();
-      ctx.shadowColor = b.color;
-      ctx.shadowBlur = 6;
-      ctx.fillStyle = b.color;
+      const tier = b.tier || 0;
+      // Эволюция шара по milestone'ам урона: цвет, свечение, обводка и искры
+      if (tier >= 3) {
+        ctx.shadowColor = '#FFD9A0'; ctx.shadowBlur = 16;
+        ctx.fillStyle = '#F4A261';
+      } else if (tier === 2) {
+        ctx.shadowColor = '#E9C46A'; ctx.shadowBlur = 13;
+        ctx.fillStyle = '#E76F51';
+      } else if (tier === 1) {
+        ctx.shadowColor = '#FFF0D0'; ctx.shadowBlur = 10;
+        ctx.fillStyle = '#E9C46A';
+      } else {
+        ctx.shadowColor = b.color; ctx.shadowBlur = 6;
+        ctx.fillStyle = b.color;
+      }
       ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fill();
       ctx.shadowBlur = 0;
+      if (tier > 0) {
+        // светящаяся золотая обводка
+        ctx.strokeStyle = 'rgba(255,232,170,' + (0.45 + 0.18 * tier) + ')';
+        ctx.lineWidth = 1.5 + tier * 0.5;
+        ctx.beginPath(); ctx.arc(b.x, b.y, b.r + 1.2, 0, Math.PI * 2); ctx.stroke();
+      }
       // Блик
       ctx.fillStyle = 'rgba(255,255,255,0.5)';
       ctx.beginPath(); ctx.arc(b.x - b.r * 0.32, b.y - b.r * 0.34, b.r * 0.34, 0, Math.PI * 2); ctx.fill();
+      if (tier >= 2) {
+        // искры вокруг продвинутых шаров
+        const a = performance.now() * 0.007 + (b.id || 0) * 2.4;
+        ctx.fillStyle = 'rgba(255,240,200,0.85)';
+        for (let s = 0; s < 2; s++) {
+          const ang = a + s * Math.PI;
+          const rr = b.r + 3 + Math.sin(performance.now() * 0.009 + s * 2) * 1.5;
+          ctx.beginPath();
+          ctx.arc(b.x + Math.cos(ang) * rr, b.y + Math.sin(ang) * rr, 1.2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
       ctx.restore();
     }
+  }
+
+  /** Гигантский фоновый счётчик комбо: удары за текущий залп */
+  function comboTier(hits) {
+    if (hits >= 250) return { label: '👑 GODLIKE', bangs: '!!!' };
+    if (hits >= 120) return { label: '⚡️ UNSTOPPABLE', bangs: '!!' };
+    if (hits >= 50) return { label: '🔥 FRENZY', bangs: '!' };
+    if (hits >= 15) return { label: 'NICE COMBO', bangs: '' };
+    return null;
+  }
+
+  function drawComboMeter() {
+    const tier = comboTier(G.comboHits);
+    if (!tier) return;
+    // Полупрозрачно и только во время полёта шаров — не мешаем прицеливанию
+    const active = G.state === ST.FIRING || G.state === ST.SIMULATING;
+    if (!active) return;
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    // Пульс от каждого удара: короткий всплеск масштаба после последнего хита
+    const since = performance.now() - G.comboPulse;
+    const pulse = Math.max(0, 1 - since / 140);          // 0..1, гаснет за ~140 мс
+    const size = (48 + Math.min(G.comboHits, 300) * 0.08) * (1 + pulse * 0.12);
+    ctx.globalAlpha = 0.18;
+    ctx.font = '900 ' + Math.round(size) + 'px system-ui, sans-serif';
+    const cx = viewW / 2;
+    const cy = viewH * 0.30;
+    ctx.fillStyle = '#FFEFD2';
+    ctx.fillText(tier.label + ' x' + G.comboHits + tier.bangs, cx, cy);
+    ctx.restore();
   }
 
   function drawParticles() {
@@ -1161,6 +1353,11 @@
       G.upgrades.damage = Math.max(0, v | 0);
       recomputeStats(); uiHud(); refreshShop();
       return 'dmg=' + G.baseDamage;
+    },
+    setBlast(v) {
+      G.upgrades.blast = Math.max(0, Math.min(C.UPGRADES.blast.maxLevel, v | 0));
+      uiHud(); refreshShop();
+      return 'blast=' + G.upgrades.blast;
     },
     /** Мгновенно уничтожить все блоки текущей волны */
     clearWave() {
