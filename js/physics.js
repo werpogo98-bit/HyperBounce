@@ -60,15 +60,25 @@
     return v;
   }
 
-  // Быстрая грубая проверка «шар рядом с треугольником?» без построения вершин.
-  // Использует окружность, гарантированно покрывающую треугольник, — никаких
-  // лишних «квадратных» срабатываний в срезанном углу.
+  // Быстрая грубая проверка «шар рядом с треугольником?».
+  // Важно: это ДОЛЖНА быть консервативная (расширенная) граница самого
+  // треугольника, иначе шар пролетает мимо «зоны интереса» и физика его
+  // теряет. Поэтому расширяем AABB блока на r+pad и дополнительно проверяем
+  // расстояние до каждой стороны — так срезанный угол остаётся пустым, а
+  // реальные грани гарантированно попадают в узкую фазу.
   function nearTriBall(ball, blk, pad) {
-    if (typeof blk.triCx !== 'number') { triVerts(blk); }
-    if (typeof blk.triCx !== 'number') return true; // не tri — пусть решает общий код
-    const dx = ball.x - blk.triCx, dy = ball.y - blk.triCy;
-    const rr = blk.triR + ball.r + pad;
-    return dx * dx + dy * dy <= rr * rr;
+    const x = blk.x, w = blk.w;
+    const y = blk._sy !== undefined ? blk._sy : blk.y, h = blk.h;
+    const R = ball.r + pad;
+    // быстрый AABB-отсев
+    if (ball.x < x - R || ball.x > x + w + R || ball.y < y - R || ball.y > y + h + R) return false;
+    const v = triVerts(blk);
+    if (!v) return true;
+    for (let i = 0; i < 3; i++) {
+      const a = v[i], b = v[(i + 1) % 3];
+      if (closestOnSeg(ball.x, ball.y, a.x, a.y, b.x, b.y).d <= R) return true;
+    }
+    return pointInTri(ball.x, ball.y, v);
   }
 
   // Индексы двух вершин, образующих ГИПОТЕНУЗУ (скошенную сторону).
@@ -125,21 +135,50 @@
   }
 
   // Честный коллайдер для половинчатых блоков: круг против РЕАЛЬНОГО треугольника.
-  // Если центр шара оказался ВНУТРИ треугольника (туннелирование на высокой
-  // скорости или выталкивание соседним блоком) — ищем ближайшую точку ПОВЕРХНОСТИ
-  // реального блока (круг радиуса r вокруг центра лежит целиком в треугольнике)
-  // и выталкиваем туда по нормали; затем, если центр всё ещё внутри, добиваем
-  // выход через гипотенузу. Прицел (previewPath) использует ровно эту же
-  // функцию, поэтому поведение совпадает с картинкой.
+  // Если центр шара оказался ВНУТРИ треугольника (туннелирование) — выталкиваем
+  // через ближайшую внешнюю сторону наружу. Снаружи — контакт только с реальными
+  // гранями; касание гипотенузы дополнительно верифицируется (см. triHypContact),
+  // поэтому ни мяч, ни прицел не «ныряют» за уголок полублока.
   function triSurfaceHit(px, py, r, verts) {
-    let best = null, bestPen = -Infinity;
+    let best = null, bestPen = -Infinity, bestI = -1;
     for (let i = 0; i < 3; i++) {
       const a = verts[i], b = verts[(i + 1) % 3];
       const c = closestOnSeg(px, py, a.x, a.y, b.x, b.y);
       const pen = r - c.d;
-      if (pen > bestPen) { bestPen = pen; best = { nx: c.nx, ny: c.ny, depth: pen }; }
+      if (pen > bestPen) { bestPen = pen; best = { nx: c.nx, ny: c.ny, depth: pen }; bestI = i; }
     }
-    return best && bestPen > 0 ? best : null;
+    if (!best || bestPen <= 0) return null;
+    best.i = bestI;
+    return best;
+  }
+
+  // Отрезок AB, точка P -> проекция на AB (в пределах отрезка)
+  function projOnSeg(px, py, ax, ay, bx, by) {
+    const abx = bx - ax, aby = by - ay;
+    const l2 = abx * abx + aby * aby;
+    let t = l2 > 0 ? ((px - ax) * abx + (py - ay) * aby) / l2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    return { x: ax + abx * t, y: ay + aby * t };
+  }
+
+  // Проверяет, что круг (px,py,r) реально касается ГИПОТЕНУЗЫ полублока, а не
+  // «фантастически» пересекает её где-то далеко от блока. Два независимых теста:
+  //  1) ближайшая к центру точка самой границы треугольника должна лежать на
+  //     гипотенузе (иначе contact идёт через прямоугольные стороны — мимо скоса);
+  //  2) проекция центра шара на гипотенузу обязана попадать в сам отрезок с
+  //     небольшим допуском (иначе шар пролетает мимо конца скошенного края,
+  //     и линия прицела «ныряла» за уголок полублока).
+  // Эта проверка одинакова и для живых шаров, и для previewPath (обе идут через
+  // Physics.triHit), поэтому прицел больше не рисует отскоков внутри пустого угла.
+  function triHypContact(edgeI, px, py, r, verts) {
+    const [ia, ib] = triHypEdge(verts);
+    if (edgeI !== ia && edgeI !== ib) return true; // контакт не со скосом — ок
+    const a = verts[ia], b = verts[ib];
+    const pr = projOnSeg(px, py, a.x, a.y, b.x, b.y);
+    const pad = r + 1;
+    if (pr.x < Math.min(a.x, b.x) - pad || pr.x > Math.max(a.x, b.x) + pad) return false;
+    if (pr.y < Math.min(a.y, b.y) - pad || pr.y > Math.max(a.y, b.y) + pad) return false;
+    return true;
   }
 
   // Сторона треугольника, лежащая на внешней (прямоугольной) границе блока.
@@ -161,11 +200,14 @@
   Physics.triHit = function (ball, blk) {
     const verts = triVerts(blk);
     if (!verts) return null;
+    // ВАЖНО: проверка «внутри» должна учитывать РАДИУС шара, а не только центр.
+    // Если весь круг шара лежит внутри треугольника (туннелирование на высокой
+    // скорости — шар проскочил грань за один подшаг), центр может оказаться
+    // глубоко внутри, при этом ближайшая ГРАНИЦА будет дальше, чем r. Раньше в
+    // этот момент возвращался null, выталкивание не срабатывало, и шар навсегда
+    // оставался внутри полублока («шарики залетают внутрь»). Теперь такой случай
+    // выталкиваем через ближайшую сторону наружу независимо от расстояния.
     if (pointInTri(ball.x, ball.y, verts)) {
-      // Центр шара ВНУТРИ треугольника — это всегда ошибка туннелирования.
-      // Выталкиваем строго наружу: через ближайшую внешнюю (прямоугольную)
-      // сторону блока, а если такой нет — через гипотенузу. Нормаль ВСЕГДА
-      // направлена из блока наружу, поэтому шар не может «нырнуть» внутрь.
       let edge = triRectEdge(verts, blk);
       if (!edge) edge = triHypEdge(verts);
       const a = verts[edge[0]], b = verts[edge[1]];
@@ -178,26 +220,48 @@
       return { nx, ny, depth };
     }
     // снаружи: честный контакт со скошенной формой (никаких невидимых стен)
-    return triSurfaceHit(ball.x, ball.y, ball.r, verts);
+    const surf = triSurfaceHit(ball.x, ball.y, ball.r, verts);
+    if (!surf) return null;
+    // Если контакт идёт через ГИПОТЕНУЗУ, дополнительно убеждаемся, что шар
+    // реально её касается (проекция центра попадает на отрезок скоса).
+    // Это исключает фантомные отскоки прицела и мячей за уголком полублока.
+    if (!triHypContact(surf.i, ball.x, ball.y, ball.r, verts)) return null;
+    return surf;
   };
 
   // Столкновение шара с треугольным блоком.
   function collideTriBlock(ball, blk, by) {
     const cfg = C();
-    const wasInside = (() => { const v = triVerts(blk); return v ? pointInTri(ball.x, ball.y, v) : false; })();
+    const v0 = triVerts(blk);
+    const wasInside = v0 ? pointInTri(ball.x, ball.y, v0) : false;
     const hit = Physics.triHit(ball, blk);
     if (hit) {
       ball.x += hit.nx * hit.depth;
       ball.y += hit.ny * hit.depth;
       reflect(ball, hit.nx, hit.ny, cfg.RESTITUTION);
+
+      // Трение по касательной к грани. Без него шар «скользит» по скосу
+      // полублока как по лыжне и улетает за его край. Здесь же — переход в
+      // состояние покоя: если после отражения скорость вдоль грани мала, а
+      // нормальная составляющая почти нулевая, гасим остаток, чтобы мяч не
+      // дрейфовал сквозь острие.
+      const tx = -hit.ny, ty = hit.nx;
+      let vt = ball.vx * tx + ball.vy * ty;
+      const vn = ball.vx * hit.nx + ball.vy * hit.ny;
+      // тангенциальное трение (только для скошенных/боковых граней)
+      const fr = Math.max(0, 1 - cfg.TRI_FRICTION);
+      vt *= fr;
+      ball.vx = hit.nx * vn + tx * vt;
+      ball.vy = hit.ny * vn + ty * vt;
+
       if (wasInside) {
         // шар был внутри стены — тащим скорость строго наружу нормали выталкивания
-        const vn = ball.vx * hit.nx + ball.vy * hit.ny;
-        if (vn < 0) {
-          const tx = -hit.ny, ty = hit.nx;
-          const vt = ball.vx * tx + ball.vy * ty;
-          ball.vx = hit.nx * Math.abs(vn) + tx * vt * 0.5;
-          ball.vy = hit.ny * Math.abs(vn) + ty * vt * 0.5;
+        const vn2 = ball.vx * hit.nx + ball.vy * hit.ny;
+        if (vn2 < 0) {
+          const ttx = -hit.ny, tty = hit.nx;
+          const vtt = ball.vx * ttx + ball.vy * tty;
+          ball.vx = hit.nx * Math.abs(vn2) + ttx * vtt * 0.5;
+          ball.vy = hit.ny * Math.abs(vn2) + tty * vtt * 0.5;
         }
       }
       return { nx: hit.nx, ny: hit.ny };
